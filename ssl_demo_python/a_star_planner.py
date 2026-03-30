@@ -2,7 +2,7 @@ import math
 import heapq
 
 class Planner:
-    def __init__(self, grid_size=100, robot_radius=250):
+    def __init__(self, grid_size=100, robot_radius=220):
         """
         初始化规划器
         :param grid_size: 栅格大小 (mm)
@@ -31,15 +31,26 @@ class Planner:
                 obstacles.append((robot.x, robot.y))
         return obstacles
 
-    def is_collision(self, gx, gy, obstacles):
+    def get_clearance_cost(self, gx, gy, obstacles):
         wx, wy = self.grid_to_world(gx, gy)
+        min_dist = float('inf')
         for ox, oy in obstacles:
-            if math.hypot(wx - ox, wy - oy) < self.ROBOT_RADIUS:
-                return True
-        return False
+            dist = math.hypot(wx - ox, wy - oy)
+            if dist < self.ROBOT_RADIUS:
+                return float('inf')  # 绝对死区，撞了
+            if dist < min_dist:
+                min_dist = dist
+                
+        # 梯度惩罚区：距离在 250 ~ 550 之间时，越靠近障碍物惩罚越大
+        safe_margin = 550.0
+        if min_dist < safe_margin:
+            # 距离越近，惩罚代价越高
+            penalty = (safe_margin - min_dist) * 0.1 
+            return penalty
+        return 0.0
 
     def a_star_search(self, start_w, goal_w, obstacles):
-        """A* 搜索主函数"""
+        """优化的 A* 搜索主函数"""
         start_g = self.world_to_grid(*start_w)
         goal_g = self.world_to_grid(*goal_w)
         
@@ -60,15 +71,17 @@ class Planner:
                 
             for dx, dy in neighbors:
                 next_g = (current[0] + dx, current[1] + dy)
-                # 场地边界限制
                 if abs(next_g[0] * self.GRID_SIZE) > 5000 or abs(next_g[1] * self.GRID_SIZE) > 4000:
                     continue
                     
-                if self.is_collision(next_g[0], next_g[1], obstacles):
-                    continue
+                # 获取该网格的安全代价
+                clearance_penalty = self.get_clearance_cost(next_g[0], next_g[1], obstacles)
+                if clearance_penalty == float('inf'):
+                    continue  # 撞墙，不可走
                     
                 move_cost = 1.414 if dx != 0 and dy != 0 else 1.0
-                new_cost = cost_so_far[current] + move_cost
+                # 总代价 = 移动距离 + 靠近障碍物的惩罚
+                new_cost = cost_so_far[current] + move_cost + clearance_penalty
                 
                 if next_g not in cost_so_far or new_cost < cost_so_far[next_g]:
                     cost_so_far[next_g] = new_cost

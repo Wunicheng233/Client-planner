@@ -16,7 +16,6 @@ def smooth_path(path, iterations=2):
         path = new_path
     return path
 
-
 class RobotController:
     def __init__(self, vision, action, debugger, planner):
         self.vision = vision
@@ -36,7 +35,8 @@ class RobotController:
         # 评测记录
         self.collision_count = 0
         self.was_colliding = False
-        self.COLLISION_THRESHOLD = 180
+        self.last_collision_time = 0.0
+        self.COLLISION_THRESHOLD = 200
         
         self.global_path = []
         self.target_index = 0
@@ -49,11 +49,37 @@ class RobotController:
                 if math.hypot(my_robot.x - ox, my_robot.y - oy) < self.COLLISION_THRESHOLD:
                     is_colliding_now = True
                     break
-            if is_colliding_now and not self.was_colliding:
-                self.collision_count += 1
-                print(f"[警告] 发生碰撞！当前累计: {self.collision_count} 次")
-            self.was_colliding = is_colliding_now
-
+            
+            if is_colliding_now:
+                current_time = time.time()
+                if not self.was_colliding and (current_time - self.last_collision_time > 1.0):
+                    self.collision_count += 1
+                    self.last_collision_time = current_time
+                    print(f"[警告] 发生碰撞！当前累计: {self.collision_count} 次")
+                
+                self.was_colliding = True
+            else:
+                self.was_colliding = False
+    
+    def get_dynamic_obstacles(self):
+        """【新增】不仅获取当前坐标，还提取黄车的速度向量生成未来残影"""
+        obstacles = []
+        # 提取动态黄车及残影
+        for robot in self.vision.yellow_robot:
+            if robot.visible:
+                obstacles.append((robot.x, robot.y))
+                # 如果速度较快，额外增加 0.35秒 后的残影点
+                if abs(robot.vel_x) > 50 or abs(robot.vel_y) > 50:
+                    ghost_x = robot.x + robot.vel_x * 0.35
+                    ghost_y = robot.y + robot.vel_y * 0.35
+                    obstacles.append((ghost_x, ghost_y))
+                    
+        # 提取静态蓝车 (剔除自己)
+        for i, robot in enumerate(self.vision.blue_robot):
+            if i != 0 and robot.visible:
+                obstacles.append((robot.x, robot.y))
+        return obstacles
+    
     def check_path_blocked(self, obstacles):
         # 极其保守的防撞重规划
         if self.global_path and self.target_index < len(self.global_path):
@@ -77,7 +103,26 @@ class RobotController:
             raw_path = self.planner.a_star_search((my_robot.x, my_robot.y), self.current_target, obstacles)
             if raw_path:
                 raw_path[-1] = self.current_target 
-                self.global_path = smooth_path(raw_path, iterations=3)
+                
+                # 滑动均值滤波去毛刺
+                window = 3  # 滤波窗口，数值越大折线越直
+                filtered_path = []
+                
+                for i in range(len(raw_path)):
+                    # 起点和终点绝对不能动，锁死目标
+                    if i == 0 or i == len(raw_path) - 1:
+                        filtered_path.append(raw_path[i])
+                        continue
+                    
+                    # 截取当前点前后几个点，取平均坐标
+                    start = max(0, i - window)
+                    end = min(len(raw_path), i + window + 1)
+                    avg_x = sum(p[0] for p in raw_path[start:end]) / (end - start)
+                    avg_y = sum(p[1] for p in raw_path[start:end]) / (end - start)
+                    filtered_path.append((avg_x, avg_y))
+
+                # 把去完毛刺的干净路线，交给原有的函数做最后圆弧润色
+                self.global_path = smooth_path(filtered_path, iterations=2)
                 self.target_index = 0
             else:
                 self.global_path = []
@@ -180,7 +225,7 @@ class RobotController:
                 continue
 
             # 1. 获取障碍物
-            obstacles = self.planner.get_obstacles(self.vision)
+            obstacles = self.get_dynamic_obstacles()
 
             # 2. 碰撞检测
             self.check_collisions(my_robot, obstacles)
